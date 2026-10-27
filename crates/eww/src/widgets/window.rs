@@ -15,12 +15,15 @@ pub struct WindowPriv {
 
     #[property(get, name = "y", nick = "Y", blurb = "Global y coordinate", default = 0)]
     y: RefCell<i32>,
+
+    // Only set after the first drag. This is never persisted across window lifetimes.
+    drag_position: RefCell<Option<(i32, i32)>>,
 }
 
 // This should match the default values from the ParamSpecs
 impl Default for WindowPriv {
     fn default() -> Self {
-        WindowPriv { x: RefCell::new(0), y: RefCell::new(0) }
+        WindowPriv { x: RefCell::new(0), y: RefCell::new(0), drag_position: RefCell::new(None) }
     }
 }
 
@@ -45,6 +48,21 @@ impl Window {
         priv_.x.replace(x_);
         priv_.y.replace(y_);
         w
+    }
+
+    /// Initial top-left monitor-relative coordinates, as computed from the Yuck geometry.
+    pub fn initial_drag_position(&self) -> (i32, i32) {
+        let private = self.imp();
+        (*private.x.borrow(), *private.y.borrow())
+    }
+
+    /// None until the user begins dragging this particular window instance.
+    pub fn drag_position(&self) -> Option<(i32, i32)> {
+        *self.imp().drag_position.borrow()
+    }
+
+    pub fn set_drag_position(&self, x: i32, y: i32) {
+        self.imp().drag_position.replace(Some((x, y)));
     }
 }
 
