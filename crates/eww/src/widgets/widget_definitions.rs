@@ -802,6 +802,12 @@ const WIDGET_NAME_EVENTBOX: &str = "eventbox";
 fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
     let gtk_widget = gtk::EventBox::new();
 
+    // A drag handle needs an input-only window above its child controls.
+    // Keep ordinary eventboxes unchanged (their visible window may be styled).
+    if bargs.widget_use.attrs.ast_optional::<simplexpr::SimplExpr>("window-drag")?.is_some() {
+        gtk_widget.set_visible_window(false);
+    }
+
     // Support :hover selector
     gtk_widget.connect_enter_notify_event(|gtk_widget, evt| {
         if evt.detail() != NotifyType::Inferior {
@@ -829,6 +835,97 @@ fn build_gtk_event_box(bargs: &mut BuilderArgs) -> Result<gtk::EventBox> {
     });
 
     def_widget!(bargs, _g, gtk_widget, {
+        // @prop window-drag - When true, left-drag this eventbox to move its Eww layer window (Wayland only).
+        // The value can be updated at runtime with eww update; positions reset when the window is reopened.
+        prop(window_drag: as_bool) {
+            #[cfg(feature = "wayland")]
+            {
+                use gtk_layer_shell::{Edge, LayerShell};
+
+                // In edit mode the transparent input window catches clicks before child
+                // buttons and sliders. Outside edit mode those children work normally.
+                gtk_widget.set_above_child(window_drag);
+                gtk_widget.add_events(
+                    gdk::EventMask::BUTTON_PRESS_MASK
+                        | gdk::EventMask::BUTTON_RELEASE_MASK
+                        | gdk::EventMask::POINTER_MOTION_MASK,
+                );
+
+                // Pointer coordinates are relative to the moving widget, not a global
+                // Wayland coordinate. Apply each displacement to the *current* margin;
+                // otherwise the surface moving under the pointer feeds back into drag.
+                let press_position = Rc::new(RefCell::new(None::<(f64, f64)>));
+
+                connect_signal_handler!(gtk_widget, gtk_widget.connect_button_press_event({
+                    let press_position = Rc::clone(&press_position);
+                    move |eventbox, event| {
+                        if !window_drag || event.button() != 1 {
+                            return glib::Propagation::Proceed;
+                        }
+                        let Some(window) = eventbox.toplevel().and_then(|w| w.downcast::<crate::widgets::window::Window>().ok()) else {
+                            return glib::Propagation::Proceed;
+                        };
+                        if !window.is_layer_window() {
+                            return glib::Propagation::Proceed;
+                        }
+
+                        // Convert the original anchor (which may be centered) to
+                        // top-left coordinates only on this window's first drag.
+                        // Keep the in-memory coordinates until this window closes.
+                        if window.drag_position().is_none() {
+                            let (x, y) = window.initial_drag_position();
+                            window.set_anchor(Edge::Right, false);
+                            window.set_anchor(Edge::Bottom, false);
+                            window.set_anchor(Edge::Left, true);
+                            window.set_anchor(Edge::Top, true);
+                            window.set_layer_shell_margin(Edge::Left, x);
+                            window.set_layer_shell_margin(Edge::Top, y);
+                            window.set_drag_position(x, y);
+                        }
+
+                        *press_position.borrow_mut() = Some(event.position());
+                        glib::Propagation::Stop
+                    }
+                }));
+
+                connect_signal_handler!(gtk_widget, gtk_widget.connect_motion_notify_event({
+                    let press_position = Rc::clone(&press_position);
+                    move |eventbox, event| {
+                        let Some((start_x, start_y)) = *press_position.borrow() else {
+                            return glib::Propagation::Proceed;
+                        };
+                        let Some(window) = eventbox.toplevel().and_then(|w| w.downcast::<crate::widgets::window::Window>().ok()) else {
+                            return glib::Propagation::Proceed;
+                        };
+                        let Some((x, y)) = window.drag_position() else {
+                            return glib::Propagation::Proceed;
+                        };
+                        let (pointer_x, pointer_y) = event.position();
+                        let dx = (pointer_x - start_x).round() as i32;
+                        let dy = (pointer_y - start_y).round() as i32;
+                        if dx != 0 || dy != 0 {
+                            let x = x.saturating_add(dx);
+                            let y = y.saturating_add(dy);
+                            window.set_drag_position(x, y);
+                            window.set_layer_shell_margin(Edge::Left, x);
+                            window.set_layer_shell_margin(Edge::Top, y);
+                        }
+                        glib::Propagation::Stop
+                    }
+                }));
+
+                connect_signal_handler!(gtk_widget, gtk_widget.connect_button_release_event({
+                    let press_position = Rc::clone(&press_position);
+                    move |_, event| {
+                        if event.button() == 1 && press_position.borrow_mut().take().is_some() {
+                            glib::Propagation::Stop
+                        } else {
+                            glib::Propagation::Proceed
+                        }
+                    }
+                }));
+            }
+        },
         // @prop timeout - timeout of the command. Default: "200ms"
         // @prop onscroll - event to execute when the user scrolls with the mouse over the widget. The placeholder `{}` used in the command will be replaced with either `up` or `down`.
         prop(timeout: as_duration = Duration::from_millis(200), onscroll: as_string) {
